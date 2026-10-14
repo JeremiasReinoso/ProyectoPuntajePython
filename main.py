@@ -403,6 +403,7 @@ class ScoringEngine:
             "sets_b": sets_b,
             "score_lines": score_lines,
             "score_format": "sets",
+            "status": "confirmed",
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z"
         }
         return result
@@ -439,6 +440,32 @@ class ScoringEngine:
         return ScoringEngine.official_points_for_result(result["sets_a"], result["sets_b"])
 
     @staticmethod
+    def is_confirmed_result(result):
+        """Return whether a saved result is complete enough to classify.
+
+        Old records may contain only the traditional result. They still count
+        for match/classification points, but cannot contribute invented PF/PC.
+        """
+        if result.get("status", "confirmed") not in ("confirmed", "final", None):
+            return False
+        try:
+            if not ScoringEngine.validate_match_result(result["sets_a"], result["sets_b"]):
+                return False
+            lines = result.get("score_lines")
+            return (
+                result.get("score_format") == "sets"
+                and isinstance(lines, (list, tuple))
+                and len(lines) == result["sets_a"] + result["sets_b"]
+                and all(
+                    isinstance(line, (list, tuple)) and len(line) == 2
+                    and all(isinstance(value, int) and value >= 0 for value in line)
+                    for line in lines
+                )
+            )
+        except (KeyError, TypeError):
+            return False
+
+    @staticmethod
     def validate_set_scores(sets_a, sets_b, score_lines):
         """Validate and return canonical per-set scores: [[A, B], ...]."""
         expected = sets_a + sets_b
@@ -459,31 +486,24 @@ class ScoringEngine:
 
     @staticmethod
     def set_totals(match):
-        """Return PF/PC totals, accepting old saved two-row totals as legacy data."""
+        """Return the two raw set totals for Team A (PF, PC)."""
         lines = match.get("score_lines", [])
-        if match.get("score_format") == "sets":
+        if ScoringEngine.is_confirmed_result(match):
             return (
                 sum(line[0] for line in lines),
                 sum(line[1] for line in lines),
             )
-        # Version 1 stored [[A_PF, A_PC], [B_PF, B_PC]].
-        if len(lines) == 2 and all(isinstance(line, (list, tuple)) and len(line) == 2 for line in lines):
-            a_pf, a_pc = lines[0]
-            b_pf, b_pc = lines[1]
-            return (int(a_pf), int(a_pc)) if match.get("team_a") else (int(b_pf), int(b_pc))
         return (0, 0)
 
     @staticmethod
     def team_set_totals(match, team_id):
         lines = match.get("score_lines", [])
-        if match.get("score_format") == "sets":
+        if ScoringEngine.is_confirmed_result(match):
             if match["team_a"] == team_id:
                 return sum(line[0] for line in lines), sum(line[1] for line in lines)
             return sum(line[1] for line in lines), sum(line[0] for line in lines)
-        # Legacy data has already accumulated PF/PC by team in each row.
-        if len(lines) == 2 and all(len(line) == 2 for line in lines):
-            row = lines[0] if match["team_a"] == team_id else lines[1]
-            return int(row[0]), int(row[1])
+        # Historical results without real set markers deliberately contribute
+        # zero PF/PC; their traditional result remains usable for standings.
         return 0, 0
 
 
@@ -541,11 +561,20 @@ class ClassificationManager:
         puntos_partido = 0
         puntos_favor = 0
         puntos_contra = 0
+        partidos_jugados = 0
         for match in matches:
             if team_id not in (match["team_a"], match["team_b"]):
                 continue
+            if match.get("status", "confirmed") not in ("confirmed", "final", None):
+                continue
             sets_a, sets_b = match["sets_a"], match["sets_b"]
-            points_a, points_b = ScoringEngine.score_for_match(match)
+            try:
+                points_a, points_b = ScoringEngine.score_for_match(match)
+            except (KeyError, ValueError):
+                # A malformed/incomplete historical row must not affect the
+                # standings or be treated as a played match.
+                continue
+            partidos_jugados += 1
             if match["team_a"] == team_id:
                 puntos_partido += points_a
                 won = sets_a > sets_b
@@ -562,7 +591,7 @@ class ClassificationManager:
         return {
             "equipo_id": team_id,
             "equipo": team_name,
-            "partidos_jugados": len(matches),
+            "partidos_jugados": partidos_jugados,
             "partidos_ganados": ganados,
             "partidos_perdidos": perdidos,
             "puntos_partido": puntos_partido,
@@ -728,6 +757,7 @@ class ResultManager:
                 result["sets_a"] = new_sets_a
                 result["sets_b"] = new_sets_b
                 result["score_lines"] = new_score_lines
+                result["status"] = "confirmed"
                 result["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
                 return result
         raise ValueError("Resultado no encontrado.")
@@ -762,6 +792,7 @@ class ResultManager:
             "sets_b": sets_b,
             "score_lines": score_lines,
             "score_format": "sets",
+            "status": "confirmed",
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "stage": "unique"
         }
@@ -891,7 +922,7 @@ class MainApplication:
         e3 = zm.add_team(c["id"], z2["id"], "Equipo 3")
         e4 = zm.add_team(c["id"], z2["id"], "Equipo 4")
         rm = ResultManager(self.current_tournament)
-        rm.add_result(c["id"], z1["id"], e1["id"], e2["id"], 2, 0, [[25, 18], [18, 25]])
+        rm.add_result(c["id"], z1["id"], e1["id"], e2["id"], 2, 0, [[25, 18], [25, 20]])
         rm.add_result(c["id"], z2["id"], e3["id"], e4["id"], 2, 1, [[25, 20], [22, 25], [15, 10]])
         self.manager.save()
 
@@ -1240,8 +1271,51 @@ class MainApplication:
             b = next((t['name'] for t in zone['teams'] if t['id'] == result['team_b']), result['team_b'])
             text = " / ".join(f"{line[0]}-{line[1]}" for line in result.get("score_lines", []))
             ctk.CTkLabel(frame, text=f"{a} {result['sets_a']} - {result['sets_b']} {b}  ({text})").pack(side='left', padx=10, pady=10)
+            ctk.CTkButton(frame, text="Editar", width=80,
+                command=lambda rid=result['id']: self.edit_result_dialog(category_id, zone_id, rid)).pack(side="right", padx=2)
             ctk.CTkButton(frame, text="Eliminar", width=80,
                 command=lambda rid=result['id']: self.delete_result(category_id, zone_id, rid)).pack(side="right", padx=8)
+
+    def edit_result_dialog(self, category_id, zone_id, result_id):
+        """Edit real set scores and recalculate standings from saved results."""
+        zone = ResultManager(self.current_tournament).find_zone(category_id, zone_id)
+        result = next((item for item in zone.get("results", []) if item.get("id") == result_id), None)
+        if not result:
+            self._show_error("Resultado no encontrado.")
+            return
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Editar resultado")
+        dialog.geometry("520x220")
+        dialog.transient(self.root)
+        entries = []
+        for index, line in enumerate(result.get("score_lines", []), start=1):
+            ctk.CTkLabel(dialog, text=f"Set {index}").grid(row=0, column=index - 1, padx=8, pady=(18, 4))
+            cell = ctk.CTkFrame(dialog, fg_color="transparent")
+            cell.grid(row=1, column=index - 1, padx=8)
+            a_entry = ctk.CTkEntry(cell, width=56)
+            b_entry = ctk.CTkEntry(cell, width=56)
+            a_entry.insert(0, str(line[0]))
+            b_entry.insert(0, str(line[1]))
+            a_entry.pack(side="left")
+            b_entry.pack(side="left", padx=(4, 0))
+            entries.append((a_entry, b_entry))
+
+        def save_edit():
+            try:
+                lines = [[int(a.get().strip()), int(b.get().strip())] for a, b in entries]
+                ResultManager(self.current_tournament).update_result(
+                    category_id, zone_id, result_id, score_lines=lines
+                )
+                self.manager.save()
+                dialog.destroy()
+                self._show_info("Resultado actualizado correctamente.")
+                self.result_frame(category_id, zone_id)
+            except Exception as exc:
+                self._show_error(exc)
+
+        ctk.CTkButton(dialog, text="Guardar cambios", command=save_edit).grid(
+            row=2, column=0, columnspan=max(1, len(entries)), padx=8, pady=24
+        )
 
     def preview_result(self):
         if not getattr(self, "result_score_entries", None):
@@ -1345,7 +1419,12 @@ class MainApplication:
         label.pack(anchor='w', padx=20, pady=(18, 8))
         table = ctk.CTkScrollableFrame(self.content)
         table.pack(fill='both', expand=True, padx=20, pady=10)
-        headers = ["Pos", "Equipo", "PJ", "PG", "PP", "Puntos", "PF", "PC", "Dif"]
+        ctk.CTkLabel(
+            self.content,
+            text="Desempate: puntos por resultados → PF (mayor) → PC (menor). Los históricos sin sets reales muestran PF/PC en 0.",
+            text_color="#526581",
+        ).pack(anchor="w", padx=20, pady=(0, 6))
+        headers = ["Pos", "Equipo", "PJ", "PG", "PP", "Puntos por resultados", "PF", "PC", "Dif"]
         for i, h in enumerate(headers):
             ctk.CTkLabel(table, text=h, width=80, font=ctk.CTkFont(size=12, weight='bold')).grid(row=0, column=i, padx=4, pady=4)
         for idx, row in enumerate(ranking, start=1):
@@ -1451,8 +1530,10 @@ class TestRunner:
             self.test_invalid_result_rejected,
             self.test_points_priority,
             self.test_diff_breaker,
-            self.test_classification_uses_result_then_difference_then_pf,
+            self.test_classification_uses_requested_tiebreak_order,
+            self.test_basic_pf_pc_accumulation,
             self.test_result_correction_updates_table,
+            self.test_result_edit_recalculates_without_double_count,
             self.test_result_deletion_updates_table,
             self.test_persistence_roundtrip,
             self.test_category_separation,
@@ -1548,7 +1629,7 @@ class TestRunner:
         ]
         assert sorted(ranking, key=lambda item: (-item["puntos_partido"], -item["diferencia"], -item["puntos_favor"]))[0]["puntos_favor"] == 60
 
-    def test_classification_uses_result_then_difference_then_pf(self):
+    def test_classification_uses_requested_tiebreak_order(self):
         tournament = {"categories": [{"id": "cat1", "zones": [{"id": "z1", "teams": [
             {"id": "A", "name": "A"}, {"id": "B", "name": "B"}, {"id": "C", "name": "C"}
         ], "results": [
@@ -1558,13 +1639,35 @@ class TestRunner:
              "score_lines": [[15, 10], [15, 12], [8, 15]], "score_format": "sets"}
         ]}]}]}
         ranking = ClassificationManager(tournament).calculate_zone_ranking("cat1", "z1")
-        assert ranking[0]["equipo"] == "A"
+        # B has the same traditional points as A/C but the highest PF.
+        assert ranking[0]["equipo"] == "B"
+        assert ranking[1]["equipo"] == "A"
         assert ranking[0]["puntos_partido"] == 2
-        assert ranking[0]["puntos_favor"] == 38
-        assert ranking[0]["puntos_contra"] == 37
-        assert ranking[0]["diferencia"] == 1
-        assert ranking[1]["equipo"] == "C"
         assert ranking[2]["puntos_partido"] == 2
+
+    def test_basic_pf_pc_accumulation(self):
+        tournament = {"categories": [{"id": "c", "zones": [{"id": "z", "teams": [
+            {"id": "a", "name": "A"}, {"id": "b", "name": "B"}], "results": []}]}]}
+        ResultManager(tournament).add_result("c", "z", "a", "b", score_lines=[[15, 6], [8, 15], [15, 10]])
+        rows = ClassificationManager(tournament).calculate_zone_ranking("c", "z")
+        assert rows[0]["puntos_favor"] == 38
+        assert rows[0]["puntos_contra"] == 31
+        assert rows[1]["puntos_favor"] == 31
+        assert rows[1]["puntos_contra"] == 38
+
+    def test_result_edit_recalculates_without_double_count(self):
+        tournament = {"categories": [{"id": "c", "zones": [{"id": "z", "teams": [
+            {"id": "a", "name": "A"}, {"id": "b", "name": "B"}], "results": []}]}]}
+        result = ResultManager(tournament).add_result("c", "z", "a", "b", score_lines=[[15, 6], [8, 15], [15, 10]])
+        manager = ResultManager(tournament)
+        manager.update_result("c", "z", result["id"], score_lines=[[20, 6], [8, 15], [15, 10]])
+        row = ClassificationManager(tournament).calculate_zone_ranking("c", "z")[0]
+        assert row["puntos_favor"] == 43
+        assert row["puntos_contra"] == 31
+        manager.update_result("c", "z", result["id"], score_lines=[[15, 6], [8, 15], [15, 10]])
+        row = ClassificationManager(tournament).calculate_zone_ranking("c", "z")[0]
+        assert row["puntos_favor"] == 38
+        assert row["puntos_contra"] == 31
 
     def test_result_correction_updates_table(self):
         tournament = {"categories": [{"id": "cat1", "name": "+40", "modalidad": "Mixta", "zones": [{"id": "z1", "name": "Zona A", "teams": [{"id": "A", "name": "A"}, {"id": "B", "name": "B"}], "results": [{"id": "r1", "team_a": "A", "team_b": "B", "sets_a": 2, "sets_b": 0, "score_lines": [[25, 18], [18, 25]]}]}]}]}
