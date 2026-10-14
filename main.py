@@ -1039,11 +1039,28 @@ class MainApplication:
             frame = ctk.CTkFrame(table)
             frame.pack(fill='x', padx=10, pady=5)
             ctk.CTkLabel(frame, text=t["name"]).pack(side='left', padx=10, pady=10)
+            ctk.CTkButton(frame, text="Eliminar", command=lambda tid=t["id"]: self.delete_tournament(tid)).pack(side='right', padx=(0, 10))
             ctk.CTkButton(frame, text="Abrir", command=lambda tid=t["id"]: self.open_tournament(tid)).pack(side='right', padx=10)
 
     def open_tournament(self, tournament_id):
         self.set_active_tournament(tournament_id)
         self.show_home()
+
+    def delete_tournament(self, tournament_id):
+        tournament = self.manager.ensure_tournament(tournament_id)
+        if not tournament or not messagebox.askyesno(
+            "Confirmar eliminación",
+            f"¿Eliminar el torneo '{tournament['name']}' y todos sus datos?",
+            parent=self.root,
+        ):
+            return
+        self.manager.delete_tournament(tournament_id)
+        if self._current_tournament_id == tournament_id:
+            remaining = self.manager.list_tournaments()
+            self.set_active_tournament(remaining[0]["id"] if remaining else None)
+        else:
+            self.manager.save()
+        self.show_tournaments()
 
     def show_categories(self):
         self.clear_content()
