@@ -617,10 +617,12 @@ class ClassificationManager:
                 team_stats[team_b]["matches"].append(match)
         ranked = [self.summarise_team(team_id, info["team"]["name"], info["matches"])
                   for team_id, info in team_stats.items()]
-        # Desempate: puntos tradicionales, puntos a favor y menos puntos en contra.
-        # Los empates completos conservan el orden de inserción, de forma estable.
+        # Desempate local: puntos de clasificación, diferencia de sets,
+        # puntos a favor y menos puntos en contra. La referencia web no está
+        # disponible en este proyecto, por lo que su equivalencia no puede verificarse.
         ranked.sort(key=lambda item: (
             -item["puntos_partido"],
+            -item["diferencia"],
             -item["puntos_favor"],
             item["puntos_contra"]
         ))
@@ -1438,7 +1440,7 @@ class MainApplication:
         table.pack(fill='both', expand=True, padx=20, pady=10)
         ctk.CTkLabel(
             self.content,
-            text="Desempate: puntos por resultados → PF (mayor) → PC (menor). Los históricos sin sets reales muestran PF/PC en 0.",
+            text="Desempate: puntos de clasificación → diferencia → PF (mayor) → PC (menor). No se pudo verificar la equivalencia exacta: falta la referencia del código web. Los históricos sin sets reales muestran PF/PC en 0.",
             text_color="#526581",
         ).pack(anchor="w", padx=20, pady=(0, 6))
         headers = ["Pos", "Equipo", "PJ", "PG", "PP", "Puntos por resultados", "PF", "PC", "Dif"]
