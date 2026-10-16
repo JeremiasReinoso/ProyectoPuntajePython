@@ -617,27 +617,39 @@ class ClassificationManager:
                 team_stats[team_b]["matches"].append(match)
         ranked = [self.summarise_team(team_id, info["team"]["name"], info["matches"])
                   for team_id, info in team_stats.items()]
-        # Desempate local: puntos de clasificación, diferencia de sets,
-        # puntos a favor y menos puntos en contra. La referencia web no está
-        # disponible en este proyecto, por lo que su equivalencia no puede verificarse.
-        ranked.sort(key=lambda item: (
-            -item["puntos_partido"],
+        # The official web classification source is absent; this order is
+        # provisional and must not be represented as verified equivalence.
+        return self.rank_classification(ranked)
+
+    @staticmethod
+    def rank_classification(rows):
+        """Apply one standings order and retain tied sporting positions.
+
+        The tie-break sequence remains provisional until checked against the
+        official web application's classification code.
+        """
+        ranked = sorted(rows, key=lambda item: (
+            -item["puntos_clasificacion"],
             -item["diferencia"],
             -item["puntos_favor"],
-            item["puntos_contra"]
+            item["puntos_contra"],
         ))
         previous_key = None
-        current_position = 0
+        position = 0
         for index, item in enumerate(ranked, start=1):
-            key = (item["puntos_partido"], item["puntos_favor"], item["puntos_contra"])
+            key = (
+                item["puntos_clasificacion"], item["diferencia"],
+                item["puntos_favor"], item["puntos_contra"],
+            )
             if key != previous_key:
-                current_position = index
+                position = index
                 previous_key = key
-            item["posicion"] = current_position
+            item["posicion"] = position
             item["empate"] = index > 1 and key == (
-                ranked[index - 2]["puntos_partido"],
+                ranked[index - 2]["puntos_clasificacion"],
+                ranked[index - 2]["diferencia"],
                 ranked[index - 2]["puntos_favor"],
-                ranked[index - 2]["puntos_contra"]
+                ranked[index - 2]["puntos_contra"],
             )
         return ranked
 
@@ -1440,7 +1452,7 @@ class MainApplication:
         table.pack(fill='both', expand=True, padx=20, pady=10)
         ctk.CTkLabel(
             self.content,
-            text="Desempate: puntos de clasificación → diferencia → PF (mayor) → PC (menor). No se pudo verificar la equivalencia exacta: falta la referencia del código web. Los históricos sin sets reales muestran PF/PC en 0.",
+            text="Orden provisional: puntos de clasificación → diferencia → PF (mayor) → PC (menor). No se pudo verificar la equivalencia: falta el código de clasificación web. Los históricos sin sets reales muestran PF/PC en 0.",
             text_color="#526581",
         ).pack(anchor="w", padx=20, pady=(0, 6))
         headers = ["Pos", "Equipo", "PJ", "PG", "PP", "Puntos por resultados", "PF", "PC", "Dif"]
